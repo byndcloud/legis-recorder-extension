@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Legis - Detalhes da Gravação</title>
+  <link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+
+  <!-- ============================================================
+       Estado vazio
+       ============================================================ -->
+  <div class="empty-screen" id="emptyScreen">
+    <div class="empty-content">
+      <svg class="empty-icon" viewBox="0 0 64 64" fill="none" stroke="#D1D5DB" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="8" y="8" width="48" height="48" rx="8"/>
+        <line x1="8" y1="20" x2="56" y2="20"/>
+        <circle cx="16" cy="14" r="2" fill="#D1D5DB" stroke="none"/>
+        <circle cx="24" cy="14" r="2" fill="#D1D5DB" stroke="none"/>
+        <line x1="20" y1="32" x2="44" y2="32"/>
+        <line x1="20" y1="40" x2="36" y2="40"/>
+      </svg>
+      <h2>Nenhuma gravação encontrada</h2>
+      <p>Grave um fluxo pela extensão e volte aqui para ver os detalhes.</p>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       Layout principal
+       ============================================================ -->
+  <div class="layout hidden" id="mainLayout">
+
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-brand">
+        <img src="icons/logo.svg" alt="Legis" class="sidebar-logo" />
+        <span class="sidebar-title">Gravação</span>
+        <span class="sidebar-badge" id="sidebarBadge">0</span>
+      </div>
+
+      <div class="sidebar-info" id="sidebarInfo"></div>
+
+      <nav class="step-nav" id="stepNav">
+        <!-- steps são inseridos dinamicamente -->
+      </nav>
+
+      <div class="sidebar-bottom">
+        <button class="btn-sidebar" id="btnExportViewer">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Exportar Gravação
+        </button>
+      </div>
+    </aside>
+
+    <!-- Painel de detalhes -->
+    <main class="detail-panel" id="detailPanel">
+
+      <!-- Placeholder -->
+      <div class="detail-placeholder" id="detailPlaceholder">
+        <svg class="placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="#D1D5DB" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="3"/>
+          <polyline points="8 12 11 15 16 9"/>
+        </svg>
+        <p>Selecione uma ação na lista para ver os detalhes</p>
+      </div>
+
+      <!-- Conteúdo do step selecionado -->
+      <div class="detail-content hidden" id="detailContent">
+
+        <!-- Header -->
+        <div class="detail-header">
+          <div class="detail-header-left">
+            <span class="detail-badge" id="detailBadge">1</span>
+            <span class="detail-type" id="detailType">click</span>
+          </div>
+          <div class="detail-header-right">
+            <span class="detail-time" id="detailTime"></span>
+          </div>
+        </div>
+
+        <!-- Descrição humanizada -->
+        <div class="detail-description" id="detailDescription"></div>
+
+        <!-- Anotação -->
+        <div class="detail-annotation" id="annotationBlock">
+          <div class="annotation-edit-row">
+            <svg class="icon icon-note" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            <input type="text" class="annotation-input" id="annotationEdit" placeholder="Adicionar observação neste momento da gravação...">
+            <button class="btn-save-annotation" id="btnSaveAnnotation">Salvar</button>
+          </div>
+        </div>
+
+        <!-- Screenshot -->
+        <section class="card" id="screenshotCard">
+          <div class="card-header" data-toggle="screenshotBody">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            <span>Captura de Tela</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </div>
+          <div class="card-body open" id="screenshotBody">
+            <img class="screenshot" id="screenshotImg" alt="Captura de tela">
+            <p class="muted hidden" id="noScreenshot">Captura de tela indisponível para esta ação</p>
+          </div>
+        </section>
+
+        <!-- Ação (JSON) -->
+        <section class="card">
+          <div class="card-header" data-toggle="actionBody">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            <span>Dados da Ação</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </div>
+          <div class="card-body" id="actionBody">
+            <pre class="code-block" id="actionJson"></pre>
+          </div>
+        </section>
+
+        <!-- Network -->
+        <section class="card">
+          <div class="card-header" data-toggle="networkBody">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+            <span>Requisições de Rede</span>
+            <span class="header-badge" id="networkBadge">0</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </div>
+          <div class="card-body" id="networkBody">
+            <div id="networkList"></div>
+            <p class="muted hidden" id="noNetwork">Nenhuma requisição capturada nesta ação</p>
+          </div>
+        </section>
+
+        <!-- DOM -->
+        <section class="card">
+          <div class="card-header" data-toggle="domBody">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+            <span>Código da Página</span>
+            <span class="header-badge" id="domSizeBadge">0 KB</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </div>
+          <div class="card-body" id="domBody">
+            <button class="btn-copy" id="btnCopyDom">
+              <svg class="icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+              Copiar HTML
+            </button>
+            <pre class="code-block code-small" id="domHtml"></pre>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script src="viewer.js"></script>
+</body>
+</html>

@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=380">
+  <title>Legis - Gravador de Fluxos</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <!-- ============================================================
+       TELA 1: BEM-VINDO (idle, sem dados)
+       ============================================================ -->
+  <div class="screen" id="screenWelcome">
+    <div class="screen-content centered">
+      <img src="icons/logo.svg" alt="Legis" class="logo" />
+      <h1 class="brand-title">Gravador de Fluxos</h1>
+      <p class="brand-subtitle">Grave suas ações no navegador para automatizar fluxos de trabalho</p>
+
+      <button class="btn btn-record" id="btnStartWelcome">
+        <svg class="icon" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="7"/></svg>
+        Iniciar Gravação
+      </button>
+
+      <!-- Histórico de gravações -->
+      <div class="history-section hidden" id="historySection">
+        <div class="history-divider">
+          <svg class="icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <span>Gravações recentes</span>
+        </div>
+        <div class="history-list" id="historyList"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       TELA 2: GRAVANDO
+       ============================================================ -->
+  <div class="screen hidden" id="screenRecording">
+    <div class="rec-header">
+      <div class="rec-indicator">
+        <span class="rec-dot-pulse"></span>
+        <span class="rec-label">Gravando</span>
+      </div>
+      <span class="rec-timer" id="recTimer">00:00</span>
+    </div>
+
+    <div class="screen-content centered">
+      <div class="counter-block">
+        <span class="counter-number" id="counterRecording">0</span>
+        <span class="counter-label">ações registradas</span>
+      </div>
+
+      <div class="rec-controls">
+        <button class="btn btn-secondary-action" id="btnPause">
+          <svg class="icon" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+          Pausar
+        </button>
+        <button class="btn btn-stop" id="btnStop">
+          <svg class="icon" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          Parar
+        </button>
+      </div>
+    </div>
+
+    <div class="annotation-bar">
+      <svg class="icon icon-annotation" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+      <input type="text" id="annotationInputRec" class="annotation-input" placeholder="Adicionar observação...">
+      <button class="btn-icon-action" id="btnAnnotationRec" title="Salvar observação">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       TELA 3: PAUSADO
+       ============================================================ -->
+  <div class="screen hidden" id="screenPaused">
+    <div class="rec-header paused">
+      <div class="rec-indicator">
+        <span class="rec-dot-still"></span>
+        <span class="rec-label">Pausado</span>
+      </div>
+      <span class="rec-timer" id="pauseTimer">00:00</span>
+    </div>
+
+    <div class="screen-content centered">
+      <div class="counter-block">
+        <span class="counter-number" id="counterPaused">0</span>
+        <span class="counter-label">ações registradas</span>
+      </div>
+
+      <div class="rec-controls">
+        <button class="btn btn-resume" id="btnResume">
+          <svg class="icon" viewBox="0 0 24 24" fill="currentColor"><polygon points="7,5 19,12 7,19"/></svg>
+          Retomar
+        </button>
+        <button class="btn btn-stop" id="btnStopPaused">
+          <svg class="icon" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          Parar
+        </button>
+      </div>
+    </div>
+
+    <div class="annotation-bar">
+      <svg class="icon icon-annotation" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+      <input type="text" id="annotationInputPaused" class="annotation-input" placeholder="Adicionar observação...">
+      <button class="btn-icon-action" id="btnAnnotationPaused" title="Salvar observação">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       TELA 4: GRAVAÇÃO CONCLUÍDA (idle, com dados)
+       ============================================================ -->
+  <div class="screen hidden" id="screenDone">
+    <div class="screen-content centered">
+      <div class="done-check">
+        <svg viewBox="0 0 48 48" fill="none"><circle cx="24" cy="24" r="22" stroke="#2A4DDD" stroke-width="3"/><polyline points="14,24 22,32 34,18" fill="none" stroke="#2A4DDD" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <h2 class="done-title">Gravação concluída</h2>
+      <div class="done-stats">
+        <div class="stat">
+          <span class="stat-number" id="doneSteps">0</span>
+          <span class="stat-label">ações</span>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat">
+          <span class="stat-number" id="doneDuration">0s</span>
+          <span class="stat-label">duração</span>
+        </div>
+      </div>
+
+      <div class="done-actions">
+        <button class="btn btn-primary-action" id="btnExport">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Exportar Gravação
+        </button>
+        <button class="btn btn-secondary-outline" id="btnView">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          Ver Detalhes
+        </button>
+      </div>
+
+      <div class="done-links">
+        <button class="btn-link" id="btnNewRecording">
+          <svg class="icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+          Nova gravação
+        </button>
+        <button class="btn-link" id="btnShowHistory">
+          <svg class="icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Gravações anteriores
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Mensagem de erro global -->
+  <div class="toast hidden" id="toast"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
