@@ -4,13 +4,25 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=380">
   <title>Legis - Gravador de Fluxos</title>
+  <style>.hidden{display:none!important}</style>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <!-- ============================================================
+       TELA 0: LOADING (hidratação inicial)
+       ============================================================ -->
+  <div class="screen" id="screenLoading">
+    <div class="screen-content centered">
+      <img src="icons/logo.svg" alt="Legis" class="logo logo-loading" />
+      <div class="loading-spinner" aria-label="Carregando"></div>
+      <p class="loading-text" id="loadingText">Carregando...</p>
+    </div>
+  </div>
+
+  <!-- ============================================================
        TELA 1: BEM-VINDO (idle, sem dados)
        ============================================================ -->
-  <div class="screen" id="screenWelcome">
+  <div class="screen hidden" id="screenWelcome">
     <div class="screen-content centered">
       <img src="icons/logo.svg" alt="Legis" class="logo" />
       <h1 class="brand-title">Gravador de Fluxos</h1>

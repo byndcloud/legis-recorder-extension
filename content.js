@@ -168,9 +168,12 @@
   // =========================================================================
 
   try {
-    chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATE' }, (response) => {
+    // Pergunta AM_I_RECORDING_TAB em vez de GET_RECORDING_STATE pra
+    // garantir que a auto-inicialização só roda na tab que está sendo
+    // gravada (SW resolve via sender.tab.id, fonte de verdade).
+    chrome.runtime.sendMessage({ type: 'AM_I_RECORDING_TAB' }, (response) => {
       if (chrome.runtime.lastError) return;
-      if (response && response.state === 'recording') {
+      if (response && response.isRecordingTab && response.state === 'recording') {
         isRecording = true;
         startCapture();
         console.log('[FlowRecorder] Gravação ativa detectada — captura iniciada automaticamente');

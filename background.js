@@ -18,11 +18,20 @@ const storage = new RecordingStorage();
 // Estado global da gravação
 // =========================================================================
 
-/** @type {'idle'|'recording'|'paused'} */
+/** @type {'idle'|'starting'|'recording'|'pausing'|'paused'|'resuming'|'stopping'} */
 let state = 'idle';
 
-/** @type {number|null} ID da tab sendo gravada */
+const SESSION_SNAPSHOT_KEY = 'flow_recorder_snapshot';
+let _snapshotPending = false;
+
+/** @type {number|null} ID da tab principal (onde gravação iniciou) */
 let recordingTabId = null;
+
+/** @type {Set<number>} IDs de TODAS as tabs sendo gravadas (principal + abas abertas durante a gravação) */
+const recordingTabIds = new Set();
+
+/** @type {Map<number, {index: number, url: string, title: string}>} Cache de info das tabs gravadas pra emitir steps mesmo após onRemoved */
+const tabInfoCache = new Map();
 
 /** @type {number|null} Timestamp de início da gravação */
 let recordingStartTime = null;
@@ -39,6 +48,41 @@ let lastKnownUrl = null;
 // =========================================================================
 // Utilitários
 // =========================================================================
+
+/**
+ * Grava snapshot leve em chrome.storage.session pro popup hidratar rápido
+ * sem precisar acordar o Service Worker.
+ */
+async function writeSessionCache() {
+  try {
+    const meta = await storage.getMetaOnly();
+    await chrome.storage.session.set({
+      [SESSION_SNAPSHOT_KEY]: {
+        state,
+        stepCount,
+        startTime: recordingStartTime,
+        hasRecording: !!(meta && meta.metadata && (meta.metadata.total_steps || 0) > 0),
+        recordingMeta: meta ? meta.metadata : null,
+        updatedAt: Date.now()
+      }
+    });
+  } catch (e) {
+    // session storage indisponível em contextos raros — ignorar
+  }
+}
+
+/**
+ * Throttle pra evitar gravar snapshot a cada step durante gravações rápidas.
+ * Agenda 1 write futuro se ainda não houver agendado.
+ */
+function scheduleSnapshotWrite() {
+  if (_snapshotPending) return;
+  _snapshotPending = true;
+  setTimeout(() => {
+    _snapshotPending = false;
+    writeSessionCache();
+  }, 500);
+}
 
 /**
  * Gera um UUID v4 simples.
@@ -146,6 +190,10 @@ async function startRecording(tabId) {
     await storage.clearRecording();
 
     recordingTabId = tabId;
+    recordingTabIds.clear();
+    recordingTabIds.add(tabId);
+    tabInfoCache.clear();
+    tabInfoCache.set(tabId, { index: tab.index, url: tab.url, title: tab.title || '' });
     recordingStartTime = Date.now();
     lastStepTime = recordingStartTime;
     stepCount = 0;
@@ -187,6 +235,7 @@ async function startRecording(tabId) {
 
     // Atualizar badge visual
     updateBadge();
+    await writeSessionCache();
 
     console.log('[FlowRecorder] Gravação iniciada na tab', tabId, '-', tab.url);
     return { ok: true };
@@ -194,6 +243,7 @@ async function startRecording(tabId) {
     console.error('[FlowRecorder] Erro ao iniciar gravação:', e);
     state = 'idle';
     await storage.saveState('idle');
+    await writeSessionCache();
     return { ok: false, error: e.message };
   }
 }
@@ -203,10 +253,12 @@ async function startRecording(tabId) {
  */
 async function stopRecording() {
   try {
+    if (recordingTabIds.size > 0) {
+      // Parar content scripts em todas tabs gravadas
+      await notifyAllRecordingTabs({ type: 'STOP_RECORDING' });
+    }
     if (recordingTabId) {
-      // Parar content scripts
-      await notifyContentScripts(recordingTabId, { type: 'STOP_RECORDING' });
-      // Detach debugger
+      // Detach debugger da tab principal
       await networkCapture.detach();
     }
 
@@ -219,11 +271,14 @@ async function stopRecording() {
     state = 'idle';
     await storage.saveState(state);
     recordingTabId = null;
+    recordingTabIds.clear();
+    tabInfoCache.clear();
     recordingStartTime = null;
     lastStepTime = null;
     lastKnownUrl = null;
 
     updateBadge();
+    await writeSessionCache();
 
     console.log('[FlowRecorder] Gravação parada. Total de steps:', stepCount);
     return { ok: true };
@@ -231,6 +286,7 @@ async function stopRecording() {
     console.error('[FlowRecorder] Erro ao parar gravação:', e);
     state = 'idle';
     await storage.saveState('idle');
+    await writeSessionCache();
     return { ok: false, error: e.message };
   }
 }
@@ -240,18 +296,21 @@ async function stopRecording() {
  */
 async function pauseRecording() {
   try {
-    if (recordingTabId) {
-      await notifyContentScripts(recordingTabId, { type: 'PAUSE_RECORDING' });
+    if (recordingTabIds.size > 0) {
+      await notifyAllRecordingTabs({ type: 'PAUSE_RECORDING' });
     }
 
     state = 'paused';
     await storage.saveState(state);
     updateBadge();
+    await writeSessionCache();
 
     console.log('[FlowRecorder] Gravação pausada');
     return { ok: true };
   } catch (e) {
     console.error('[FlowRecorder] Erro ao pausar gravação:', e);
+    state = 'recording'; // reverter lock 'pausing'
+    await writeSessionCache();
     return { ok: false, error: e.message };
   }
 }
@@ -261,18 +320,21 @@ async function pauseRecording() {
  */
 async function resumeRecording() {
   try {
-    if (recordingTabId) {
-      await notifyContentScripts(recordingTabId, { type: 'RESUME_RECORDING' });
+    if (recordingTabIds.size > 0) {
+      await notifyAllRecordingTabs({ type: 'RESUME_RECORDING' });
     }
 
     state = 'recording';
     await storage.saveState(state);
     updateBadge();
+    await writeSessionCache();
 
     console.log('[FlowRecorder] Gravação retomada');
     return { ok: true };
   } catch (e) {
     console.error('[FlowRecorder] Erro ao retomar gravação:', e);
+    state = 'paused'; // reverter lock 'resuming'
+    await writeSessionCache();
     return { ok: false, error: e.message };
   }
 }
@@ -282,19 +344,36 @@ async function resumeRecording() {
 // =========================================================================
 
 /**
- * Processa uma ação capturada pelo content script e monta o step completo.
+ * Processa uma ação capturada e monta o step completo.
  * Captura screenshot e coleta network requests pendentes.
+ * @param {Object} payload - dados da ação
+ * @param {number|null} sourceTabId - tab que originou a ação (null = sintético, ex: tab lifecycle)
  */
-async function processAction(payload) {
+async function processAction(payload, sourceTabId = null) {
   if (state !== 'recording') return;
 
   const now = Date.now();
 
   try {
-    // 1. Capturar screenshot da tab visível
+    // 1. Capturar screenshot da tab que originou a ação.
+    // Se a tab origem é a principal e debugger está attached, usa CDP
+    // (funciona mesmo se a tab não está visível). Caso contrário, fallback
+    // pra captureVisibleTab (pega a tab visível da window — geralmente é
+    // a mesma da ação, já que o usuário acabou de interagir com ela).
     let screenshotBase64 = null;
     try {
-      screenshotBase64 = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+      if (sourceTabId === recordingTabId && networkCapture.attached) {
+        screenshotBase64 = await networkCapture.captureScreenshot();
+      }
+      if (!screenshotBase64) {
+        const winId = sourceTabId
+          ? (await chrome.tabs.get(sourceTabId).catch(() => null))?.windowId
+          : undefined;
+        screenshotBase64 = await chrome.tabs.captureVisibleTab(
+          winId ?? null,
+          { format: 'jpeg', quality: 80 }
+        );
+      }
     } catch (e) {
       console.warn('[FlowRecorder] Screenshot indisponível:', e.message);
     }
@@ -302,15 +381,19 @@ async function processAction(payload) {
     // 2. Coletar network requests do buffer
     const networkActivity = networkCapture.flushBuffer();
 
-    // 3. Capturar índice da aba atual
+    // 3. Capturar índice da aba que originou a ação
     let tabIndex = null;
+    const tabIdForIndex = sourceTabId ?? recordingTabId;
     try {
-      if (recordingTabId) {
-        const tab = await chrome.tabs.get(recordingTabId);
+      if (tabIdForIndex) {
+        const tab = await chrome.tabs.get(tabIdForIndex);
         tabIndex = tab.index;
       }
     } catch (e) {
-      // Tab pode ter sido fechada ou não estar acessível
+      // Tab pode ter sido fechada ou não estar acessível —
+      // tentar do cache (caso de tab_closed que já saiu do navegador)
+      const cached = tabIdForIndex ? tabInfoCache.get(tabIdForIndex) : null;
+      if (cached) tabIndex = cached.index;
     }
 
     // 4. #6 — Coletar mensagens de console (errors/warnings)
@@ -372,6 +455,7 @@ async function processAction(payload) {
 
     // 10. Atualizar badge
     updateBadge();
+    scheduleSnapshotWrite();
 
     console.log(`[FlowRecorder] Step ${step.step_index} registrado: ${payload.action.type}`);
   } catch (e) {
@@ -408,6 +492,14 @@ async function notifyContentScripts(tabId, message) {
   }
 }
 
+/**
+ * Envia mensagem pra TODAS as tabs gravadas (principal + abas abertas durante).
+ */
+async function notifyAllRecordingTabs(message) {
+  const ids = [...recordingTabIds];
+  await Promise.all(ids.map(id => notifyContentScripts(id, message)));
+}
+
 // =========================================================================
 // Badge da Extensão
 // =========================================================================
@@ -441,44 +533,89 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // --- Comandos do Popup ---
 
       case 'START_RECORDING': {
+        if (state !== 'idle') {
+          sendResponse({ ok: false, error: `Já existe ação em andamento (${state})` });
+          return false;
+        }
+        state = 'starting'; // lock síncrono — bloqueia segunda entrada
         chrome.tabs.query({ active: true, currentWindow: true }).then(tabs => {
           if (tabs[0]) {
             startRecording(tabs[0].id).then(sendResponse);
           } else {
+            state = 'idle';
+            writeSessionCache();
             sendResponse({ ok: false, error: 'Nenhuma tab ativa encontrada' });
           }
         });
         return true; // Resposta assíncrona
       }
 
-      case 'STOP_RECORDING':
+      case 'STOP_RECORDING': {
+        if (state !== 'recording' && state !== 'paused') {
+          sendResponse({ ok: false, error: `Não é possível parar no estado ${state}` });
+          return false;
+        }
+        state = 'stopping';
         stopRecording().then(sendResponse);
         return true;
+      }
 
-      case 'PAUSE_RECORDING':
+      case 'PAUSE_RECORDING': {
+        if (state !== 'recording') {
+          sendResponse({ ok: false, error: `Não é possível pausar no estado ${state}` });
+          return false;
+        }
+        state = 'pausing';
         pauseRecording().then(sendResponse);
         return true;
+      }
 
-      case 'RESUME_RECORDING':
+      case 'RESUME_RECORDING': {
+        if (state !== 'paused') {
+          sendResponse({ ok: false, error: `Não é possível retomar no estado ${state}` });
+          return false;
+        }
+        state = 'resuming';
         resumeRecording().then(sendResponse);
         return true;
+      }
+
+      case 'DISMISS_CURRENT_RECORDING': {
+        if (state !== 'idle') {
+          sendResponse({ ok: false, error: `Não é possível descartar no estado ${state}` });
+          return false;
+        }
+        (async () => {
+          try {
+            await storage.archiveCurrentRecording();
+            await storage.clearRecording();
+            stepCount = 0;
+            await writeSessionCache();
+            sendResponse({ ok: true });
+          } catch (e) {
+            console.error('[FlowRecorder] Erro ao descartar recording:', e);
+            sendResponse({ ok: false, error: e.message });
+          }
+        })();
+        return true;
+      }
 
       case 'GET_RECORDING_STATE': {
-        // Verificar se existe recording salvo (para estado pós-gravação)
-        storage.getRecording().then(rec => {
-          // Derivar startTime: preferir memória, senão metadata persistido
+        // Verificar se existe recording salvo (para estado pós-gravação).
+        // Usa getMetaOnly — não carrega steps (pode ser MB de screenshots).
+        storage.getMetaOnly().then(meta => {
           let effectiveStartTime = recordingStartTime;
-          if (!effectiveStartTime && rec && rec.metadata) {
-            effectiveStartTime = rec.metadata.start_time_ms ||
-              (rec.created_at ? new Date(rec.created_at).getTime() : null);
+          if (!effectiveStartTime && meta && meta.metadata) {
+            effectiveStartTime = meta.metadata.start_time_ms ||
+              (meta.created_at ? new Date(meta.created_at).getTime() : null);
           }
           sendResponse({
             state,
             stepCount,
             tabId: recordingTabId,
             startTime: effectiveStartTime,
-            hasRecording: !!(rec && rec.steps && rec.steps.length > 0),
-            recordingMeta: rec ? rec.metadata : null
+            hasRecording: !!(meta && meta.metadata && (meta.metadata.total_steps || 0) > 0),
+            recordingMeta: meta ? meta.metadata : null
           });
         });
         return true; // Resposta assíncrona
@@ -496,9 +633,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       // --- Ações do Content Script ---
 
-      case 'ACTION_CAPTURED':
-        processAction(message.payload).then(() => sendResponse({ ok: true }));
+      case 'ACTION_CAPTURED': {
+        // Aceita ações de qualquer tab pertencente ao set de tabs gravadas
+        // (principal + abas abertas durante a gravação).
+        if (!sender.tab || !recordingTabIds.has(sender.tab.id)) {
+          sendResponse({ ok: false, error: 'tab não está sendo gravada' });
+          return false;
+        }
+        processAction(message.payload, sender.tab.id).then(() => sendResponse({ ok: true }));
         return true;
+      }
+
+      case 'AM_I_RECORDING_TAB': {
+        // Content script pergunta se a própria tab está sendo gravada.
+        // SW resolve via sender.tab.id (fonte de verdade).
+        const isRecordingTab = !!(sender.tab && recordingTabIds.has(sender.tab.id));
+        sendResponse({ isRecordingTab, state });
+        return false;
+      }
 
       // --- Anotações (timestamped) ---
 
@@ -554,7 +706,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  * Gera steps de navigation automaticamente.
  */
 chrome.webNavigation.onCommitted.addListener((details) => {
-  if (state !== 'recording' || details.tabId !== recordingTabId) return;
+  if (state !== 'recording' || !recordingTabIds.has(details.tabId)) return;
   if (details.frameId !== 0) return; // Apenas frame principal
 
   // Determinar o que causou a navegação
@@ -593,8 +745,10 @@ chrome.webNavigation.onCommitted.addListener((details) => {
     timestamp: new Date().toISOString()
   };
 
-  lastKnownUrl = details.url;
-  processAction(payload);
+  if (details.tabId === recordingTabId) {
+    lastKnownUrl = details.url;
+  }
+  processAction(payload, details.tabId);
 });
 
 /**
@@ -602,7 +756,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
  * Comum em sistemas de tribunais modernos.
  */
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
-  if (state !== 'recording' || details.tabId !== recordingTabId) return;
+  if (state !== 'recording' || !recordingTabIds.has(details.tabId)) return;
   if (details.frameId !== 0) return;
 
   const previousUrl = lastKnownUrl || '';
@@ -623,8 +777,156 @@ chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
     timestamp: new Date().toISOString()
   };
 
-  lastKnownUrl = details.url;
-  processAction(payload);
+  if (details.tabId === recordingTabId) {
+    lastKnownUrl = details.url;
+  }
+  processAction(payload, details.tabId);
+});
+
+// =========================================================================
+// Listeners de Lifecycle de Abas
+// =========================================================================
+
+/**
+ * Constrói e processa um step sintético gerado pelo background
+ * (eventos de tab que não vêm de content scripts).
+ */
+function emitSyntheticAction(action, sourceTabId = null, urlOverride = null) {
+  const url = urlOverride
+    || (sourceTabId ? tabInfoCache.get(sourceTabId)?.url : null)
+    || lastKnownUrl
+    || '';
+  const pageTitle = sourceTabId ? tabInfoCache.get(sourceTabId)?.title || '' : '';
+  processAction({
+    action,
+    dom_snapshot: '',
+    url,
+    page_title: pageTitle,
+    timestamp: new Date().toISOString()
+  }, sourceTabId);
+}
+
+/**
+ * Nova aba aberta durante gravação.
+ * Adiciona ao set de tabs gravadas e emite step `tab_opened`.
+ */
+chrome.tabs.onCreated.addListener((tab) => {
+  if (state !== 'recording') return;
+  // Tab pode ser de outra janela não relacionada — Chrome não fornece
+  // forma direta de saber. Política: incluir TODA nova aba criada durante
+  // a gravação, pois o usuário pode usá-la como parte do fluxo.
+  if (tab.id == null) return;
+
+  recordingTabIds.add(tab.id);
+  tabInfoCache.set(tab.id, { index: tab.index, url: tab.url || tab.pendingUrl || '', title: tab.title || '' });
+
+  emitSyntheticAction({
+    type: 'tab_opened',
+    new_tab_id: tab.id,
+    new_tab_index: tab.index,
+    opener_tab_id: tab.openerTabId ?? null,
+    initial_url: tab.url || tab.pendingUrl || ''
+  }, tab.id);
+});
+
+/**
+ * Foco trocou pra outra aba.
+ */
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  if (state !== 'recording') return;
+  // Só registra se a tab focada está no set (caso contrário usuário foi
+  // pra uma aba não relacionada — ruído, ignorar).
+  if (!recordingTabIds.has(activeInfo.tabId)) return;
+
+  let toUrl = tabInfoCache.get(activeInfo.tabId)?.url || '';
+  let toIndex = tabInfoCache.get(activeInfo.tabId)?.index ?? null;
+  try {
+    const tab = await chrome.tabs.get(activeInfo.tabId);
+    toUrl = tab.url || toUrl;
+    toIndex = tab.index;
+    tabInfoCache.set(tab.id, { index: tab.index, url: tab.url || '', title: tab.title || '' });
+  } catch (_) {}
+
+  emitSyntheticAction({
+    type: 'tab_switched',
+    to_tab_id: activeInfo.tabId,
+    to_tab_index: toIndex,
+    to_url: toUrl,
+    window_id: activeInfo.windowId
+  }, activeInfo.tabId);
+});
+
+/**
+ * Aba fechada.
+ */
+chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+  if (state !== 'recording') return;
+  if (!recordingTabIds.has(tabId)) return;
+
+  const info = tabInfoCache.get(tabId);
+  recordingTabIds.delete(tabId);
+
+  emitSyntheticAction({
+    type: 'tab_closed',
+    closed_tab_id: tabId,
+    closed_tab_index: info?.index ?? null,
+    last_url: info?.url || '',
+    window_closing: !!removeInfo.isWindowClosing
+  }, null, info?.url || '');
+
+  tabInfoCache.delete(tabId);
+});
+
+/**
+ * Aba reordenada.
+ */
+chrome.tabs.onMoved.addListener((tabId, moveInfo) => {
+  if (state !== 'recording') return;
+  if (!recordingTabIds.has(tabId)) return;
+
+  const info = tabInfoCache.get(tabId);
+  if (info) info.index = moveInfo.toIndex;
+
+  emitSyntheticAction({
+    type: 'tab_moved',
+    tab_id: tabId,
+    from_index: moveInfo.fromIndex,
+    to_index: moveInfo.toIndex,
+    window_id: moveInfo.windowId
+  }, tabId);
+});
+
+/**
+ * Aba mudou de janela (detach/reattach).
+ */
+chrome.tabs.onAttached.addListener((tabId, attachInfo) => {
+  if (state !== 'recording') return;
+  if (!recordingTabIds.has(tabId)) return;
+
+  emitSyntheticAction({
+    type: 'tab_attached',
+    tab_id: tabId,
+    new_window_id: attachInfo.newWindowId,
+    new_position: attachInfo.newPosition
+  }, tabId);
+});
+
+/**
+ * Quando uma tab nova termina de carregar, garantir que o content script
+ * tenha sido inicializado (auto-init via AM_I_RECORDING_TAB já cobre isso).
+ * Atualiza o cache de info quando URL muda.
+ */
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (state !== 'recording') return;
+  if (!recordingTabIds.has(tabId)) return;
+
+  if (changeInfo.url || changeInfo.title || changeInfo.status === 'complete') {
+    tabInfoCache.set(tabId, {
+      index: tab.index,
+      url: tab.url || tabInfoCache.get(tabId)?.url || '',
+      title: tab.title || tabInfoCache.get(tabId)?.title || ''
+    });
+  }
 });
 
 // =========================================================================
@@ -648,15 +950,15 @@ async function restoreState() {
     const savedState = await storage.getState();
     if (savedState === 'recording' || savedState === 'paused') {
       // Não podemos restaurar completamente (debugger, tabId, etc.)
-      // mas podemos restaurar a contagem de steps e o estado visual
-      const recording = await storage.getRecording();
-      if (recording) {
-        stepCount = recording.steps.length;
-        // Restaurar recordingStartTime a partir dos metadados persistidos
-        if (recording.metadata.start_time_ms) {
-          recordingStartTime = recording.metadata.start_time_ms;
-        } else if (recording.created_at) {
-          recordingStartTime = new Date(recording.created_at).getTime();
+      // mas podemos restaurar a contagem de steps e o estado visual.
+      // Usa getMetaOnly — não carrega steps inteiros do storage.
+      const meta = await storage.getMetaOnly();
+      if (meta) {
+        stepCount = meta.metadata.total_steps || 0;
+        if (meta.metadata.start_time_ms) {
+          recordingStartTime = meta.metadata.start_time_ms;
+        } else if (meta.created_at) {
+          recordingStartTime = new Date(meta.created_at).getTime();
         }
         state = 'paused'; // Forçar pausa — o usuário precisa retomar manualmente
         await storage.saveState(state);
@@ -668,6 +970,7 @@ async function restoreState() {
       }
       updateBadge();
     }
+    await writeSessionCache();
   } catch (e) {
     console.error('[FlowRecorder] Erro ao restaurar estado:', e);
   }

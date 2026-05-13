@@ -10,6 +10,7 @@
   // =========================================================================
 
   const screens = {
+    loading: document.getElementById('screenLoading'),
     welcome: document.getElementById('screenWelcome'),
     recording: document.getElementById('screenRecording'),
     paused: document.getElementById('screenPaused'),
@@ -43,19 +44,26 @@
     // History
     historySection: document.getElementById('historySection'),
     historyList: document.getElementById('historyList'),
+    // Loading
+    loadingText: document.getElementById('loadingText'),
     // Toast
     toast: document.getElementById('toast')
   };
+
+  function setLoadingText(msg) {
+    if (els.loadingText) els.loadingText.textContent = msg;
+  }
 
   // =========================================================================
   // Estado
   // =========================================================================
 
-  let currentScreen = 'welcome';
+  let currentScreen = 'loading';
   let stepCount = 0;
   let startTime = null;
   let timerInterval = null;
   let pausedElapsed = null;
+  let pendingAction = null; // lock síncrono contra double-click
 
   // =========================================================================
   // Comunicação com o Service Worker
@@ -165,53 +173,98 @@
 
   // Iniciar gravação
   async function handleStart() {
+    if (pendingAction) return;
+    pendingAction = 'start';
     els.btnStartWelcome.disabled = true;
-    const response = await sendMessage({ type: 'START_RECORDING' });
-    els.btnStartWelcome.disabled = false;
-
-    if (response.ok) {
-      stepCount = 0;
-      els.counterRecording.textContent = '0';
-      startTimer(Date.now());
-      showScreen('recording');
-    } else {
-      showToast('Erro ao iniciar: ' + (response.error || ''), 'error');
+    const previousScreen = currentScreen;
+    setLoadingText('Iniciando gravação...');
+    showScreen('loading');
+    try {
+      const response = await sendMessage({ type: 'START_RECORDING' });
+      if (response.ok) {
+        stepCount = 0;
+        els.counterRecording.textContent = '0';
+        startTimer(Date.now());
+        showScreen('recording');
+      } else {
+        showToast('Erro ao iniciar: ' + (response.error || ''), 'error');
+        showScreen(previousScreen);
+      }
+    } finally {
+      pendingAction = null;
+      els.btnStartWelcome.disabled = false;
     }
   }
 
   // Pausar
   async function handlePause() {
-    const response = await sendMessage({ type: 'PAUSE_RECORDING' });
-    if (response.ok) {
-      stopTimer();
-      pausedElapsed = startTime ? Date.now() - startTime : 0;
-      els.pauseTimer.textContent = formatTimer(pausedElapsed);
-      els.counterPaused.textContent = String(stepCount);
-      showScreen('paused');
+    if (pendingAction) return;
+    pendingAction = 'pause';
+    els.btnPause.disabled = true;
+    try {
+      const response = await sendMessage({ type: 'PAUSE_RECORDING' });
+      if (response.ok) {
+        stopTimer();
+        pausedElapsed = startTime ? Date.now() - startTime : 0;
+        els.pauseTimer.textContent = formatTimer(pausedElapsed);
+        els.counterPaused.textContent = String(stepCount);
+        showScreen('paused');
+      } else if (response.error) {
+        showToast('Erro ao pausar: ' + response.error, 'error');
+      }
+    } finally {
+      pendingAction = null;
+      els.btnPause.disabled = false;
     }
   }
 
   // Retomar
   async function handleResume() {
-    const response = await sendMessage({ type: 'RESUME_RECORDING' });
-    if (response.ok) {
-      // Ajustar startTime para manter o timer contínuo
-      startTime = Date.now() - (pausedElapsed || 0);
-      startTimer(startTime);
-      els.counterRecording.textContent = String(stepCount);
-      showScreen('recording');
+    if (pendingAction) return;
+    pendingAction = 'resume';
+    els.btnResume.disabled = true;
+    try {
+      const response = await sendMessage({ type: 'RESUME_RECORDING' });
+      if (response.ok) {
+        // Ajustar startTime para manter o timer contínuo
+        startTime = Date.now() - (pausedElapsed || 0);
+        startTimer(startTime);
+        els.counterRecording.textContent = String(stepCount);
+        showScreen('recording');
+      } else if (response.error) {
+        showToast('Erro ao retomar: ' + response.error, 'error');
+      }
+    } finally {
+      pendingAction = null;
+      els.btnResume.disabled = false;
     }
   }
 
   // Parar
   async function handleStop() {
-    const response = await sendMessage({ type: 'STOP_RECORDING' });
-    if (response.ok) {
-      stopTimer();
-      const elapsed = startTime ? Date.now() - startTime : (pausedElapsed || 0);
-      els.doneSteps.textContent = String(stepCount);
-      els.doneDuration.textContent = formatDuration(elapsed);
-      showScreen('done');
+    if (pendingAction) return;
+    pendingAction = 'stop';
+    els.btnStop.disabled = true;
+    els.btnStopPaused.disabled = true;
+    const previousScreen = currentScreen;
+    const elapsedBeforeStop = startTime ? Date.now() - startTime : (pausedElapsed || 0);
+    stopTimer();
+    setLoadingText('Finalizando gravação...');
+    showScreen('loading');
+    try {
+      const response = await sendMessage({ type: 'STOP_RECORDING' });
+      if (response.ok) {
+        els.doneSteps.textContent = String(stepCount);
+        els.doneDuration.textContent = formatDuration(elapsedBeforeStop);
+        showScreen('done');
+      } else if (response.error) {
+        showToast('Erro ao parar: ' + response.error, 'error');
+        showScreen(previousScreen);
+      }
+    } finally {
+      pendingAction = null;
+      els.btnStop.disabled = false;
+      els.btnStopPaused.disabled = false;
     }
   }
 
@@ -247,9 +300,12 @@
     chrome.tabs.create({ url: viewerUrl });
   }
 
-  // Nova gravação
+  // Nova gravação — arquiva o recording finalizado em histórico
+  // e limpa o slot ativo pra que próximas aberturas do popup
+  // mostrem a tela welcome (não a done).
   async function handleNew() {
     showScreen('welcome');
+    await sendMessage({ type: 'DISMISS_CURRENT_RECORDING' });
     loadHistory();
   }
 
@@ -404,30 +460,38 @@
   // Inicialização: sincronizar com estado atual do background
   // =========================================================================
 
-  async function init() {
-    const response = await sendMessage({ type: 'GET_RECORDING_STATE' });
-    if (!response) {
+  /**
+   * Renderiza tela conforme snapshot de estado vindo de cache ou SW.
+   * Idempotente — pode ser chamado múltiplas vezes (cache + reconciliação).
+   */
+  function applyState(s) {
+    if (!s) {
       showScreen('welcome');
+      loadHistory();
       return;
     }
 
-    stepCount = response.stepCount || 0;
+    stepCount = s.stepCount || 0;
 
-    switch (response.state) {
+    // 'starting'/'stopping'/'pausing'/'resuming' são transitórios; mapear pra
+    // tela mais próxima pra evitar flash de loading.
+    const effectiveState =
+      s.state === 'starting' || s.state === 'resuming' ? 'recording' :
+      s.state === 'pausing' ? 'recording' :
+      s.state === 'stopping' ? 'recording' :
+      s.state;
+
+    switch (effectiveState) {
       case 'recording':
         els.counterRecording.textContent = String(stepCount);
-        if (response.startTime) {
-          startTimer(response.startTime);
-        } else {
-          startTimer(Date.now());
-        }
+        startTimer(s.startTime || Date.now());
         showScreen('recording');
         break;
 
       case 'paused':
         els.counterPaused.textContent = String(stepCount);
-        if (response.startTime) {
-          pausedElapsed = Date.now() - response.startTime;
+        if (s.startTime) {
+          pausedElapsed = Date.now() - s.startTime;
           els.pauseTimer.textContent = formatTimer(pausedElapsed);
         }
         showScreen('paused');
@@ -435,10 +499,10 @@
 
       case 'idle':
       default:
-        if (response.hasRecording) {
+        if (s.hasRecording) {
           els.doneSteps.textContent = String(stepCount);
           els.doneDuration.textContent = formatDuration(
-            response.recordingMeta?.total_duration_ms || 0
+            s.recordingMeta?.total_duration_ms || 0
           );
           showScreen('done');
         } else {
@@ -446,6 +510,28 @@
         }
         loadHistory();
         break;
+    }
+  }
+
+  async function init() {
+    // 1. Hidratação rápida via chrome.storage.session (sem acordar SW)
+    let hadSnapshot = false;
+    try {
+      const cached = await chrome.storage.session.get('flow_recorder_snapshot');
+      const snap = cached.flow_recorder_snapshot || null;
+      if (snap) {
+        applyState(snap);
+        hadSnapshot = true;
+      }
+    } catch (_) {}
+
+    // 2. Reconciliar com SW (fonte de verdade)
+    const fresh = await sendMessage({ type: 'GET_RECORDING_STATE' });
+    if (fresh && typeof fresh.state === 'string') {
+      applyState(fresh);
+    } else if (!hadSnapshot) {
+      showScreen('welcome');
+      loadHistory();
     }
   }
 
